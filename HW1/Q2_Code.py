@@ -1,7 +1,7 @@
-import numpy
+import numpy as np
 import picos as pic
 import networkx as nx
-
+np.random.seed(42)
 
 def mu_delta(num_nodes):
     mu = {}
@@ -9,8 +9,8 @@ def mu_delta(num_nodes):
     for k in range(num_nodes):
         for j in range(num_nodes):
             if k != j:
-                m = numpy.random.rand() * 10
-                d = numpy.random.rand() * m
+                m = np.random.rand() * 10
+                d = np.random.rand() * m
                 mu[(k, j)] = m
                 delta[(k, j)] = d
     return mu, delta
@@ -26,7 +26,7 @@ def build_graph(num_nodes):
     return g
 
 
-def nominal_model(num_nodes, g, mu):
+def uncertainty_model(num_nodes, g, mu, delta, gamma, uncertainty_set="nominal"):
     prob = pic.Problem()
 
     # add flow variables
@@ -40,7 +40,7 @@ def nominal_model(num_nodes, g, mu):
     # add flow constraints
     prob.add_list_of_constraints([pic.sum([x[p, i] for p in g.nodes() if p != i]) ==
                                   pic.sum([x[i, j] for j in g.nodes() if j != i])
-                                  for i in g.nodes() if i not in (0, num_nodes)])
+                                  for i in g.nodes() if i not in (0, num_nodes - 1)])  # subtracted 1 from num_nodes
     prob.add_constraint(pic.sum([x[j, num_nodes - 1]
                                  for j in g.nodes() if j != num_nodes - 1]) == 1)  # flows to last node
     prob.add_constraint(pic.sum([x[0, j]
@@ -53,21 +53,34 @@ def nominal_model(num_nodes, g, mu):
     prob.add_list_of_constraints([x[e] >= 0 for e in g.edges()])
 
     # setting objective
-    prob.add_constraint(v >= pic.sum([mu[e] * x[e] for e in g.edges()]))
+    if uncertainty_set == "nominal":
+        prob.add_constraint(v >= pic.sum([mu[e] * x[e] for e in g.edges()]))
+    elif uncertainty_set == "box":
+        prob.add_constraint(v >= pic.sum([(mu[e] + gamma * delta[e]) * x[e] for e in g.edges()]))
+    elif uncertainty_set == "ellipsoidal":
+        prob.add_constraint(v >= pic.sum([mu[e] * x[e] for e in g.edges()]) +
+                            gamma * (pic.sum([(delta[e] * x[e]) ** 2 for e in g.edges()]) ** 0.5))
+    else:
+        prob.add_constraint(v >= pic.sum([mu[e] * x[e] for e in g.edges()]) +
+                            gamma * pic.max([abs(delta[e] * x[e]) for e in g.edges()]))
+
     prob.set_objective('min', v)
     sol = prob.solve()
     time = sol.searchTime
 
-    print('Nominal model: optimal total flow is', v, 'and run time is', time)
+    print(uncertainty_set, 'model: optimal total flow is', v, 'and run time is', time)
     return prob, x, v, time
 
 
 if __name__ == '__main__':
     # Setting Parameters
-    num_nodes = 10  # number of nodes
+    num_nodes = 8  # number of nodes
     Gamma = 1
     mu, delta = mu_delta(num_nodes)
     g = build_graph(num_nodes)  # generate the network
 
     # solve the nominal model
-    prob, x, v, time = nominal_model(num_nodes, g, mu)
+    prob, x, v, time = uncertainty_model(num_nodes, g, mu, delta, Gamma)
+    prob, x, v, time = uncertainty_model(num_nodes, g, mu, delta, Gamma, uncertainty_set="box")
+    prob, x, v, time = uncertainty_model(num_nodes, g, mu, delta, Gamma, uncertainty_set="ellipsoidal")
+    prob, x, v, time = uncertainty_model(num_nodes, g, mu, delta, Gamma, uncertainty_set="polyhedral")
